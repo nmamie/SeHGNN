@@ -153,6 +153,7 @@ def train(model, train_loader, loss_fcn, optimizer, evaluator, device,
                     output_att = torch.sigmoid(output_att)
                 loss_train = loss_fcn(output_att, batch_y)
             scalar.scale(loss_train).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             scalar.step(optimizer)
             scalar.update()
         else:
@@ -162,6 +163,7 @@ def train(model, train_loader, loss_fcn, optimizer, evaluator, device,
             L1 = loss_fcn(output_att, batch_y)
             loss_train = L1
             loss_train.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
         y_true.append(batch_y.cpu().to(torch.long))
@@ -206,6 +208,7 @@ def train_multi_stage(model, train_loader, enhance_loader, loss_fcn, optimizer, 
                 L2 = (L2 * extra_weight).sum() / len(idx_2)
                 loss_train = L1_ratio * L1 + gama * L2_ratio * L2
             scalar.scale(loss_train).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             scalar.step(optimizer)
             scalar.update()
         else:
@@ -219,6 +222,7 @@ def train_multi_stage(model, train_loader, enhance_loader, loss_fcn, optimizer, 
             # loss = L1 + L3*gama
             loss_train = L1_ratio * L1 + gama * L2_ratio * L2
             loss_train.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
         y_true.append(labels[idx_1].to(torch.long))
@@ -341,22 +345,26 @@ def load_mag(args, symmetric=True):
     val_nid = splitted_idx['valid']['paper']
     test_nid = splitted_idx['test']['paper']
 
-    features = g.nodes['paper'].data['feat']
-    if len(args.extra_embedding):
-        print(f'Use extra embeddings generated with the {args.extra_embedding} method')
-        path = os.path.join(args.emb_path, f'{args.extra_embedding}_nars')
-        author_emb = torch.load(os.path.join(path, 'author.pt'), map_location=torch.device('cpu')).float()
-        topic_emb = torch.load(os.path.join(path, 'field_of_study.pt'), map_location=torch.device('cpu')).float()
-        institution_emb = torch.load(os.path.join(path, 'institution.pt'), map_location=torch.device('cpu')).float()
-    else:
-        author_emb = torch.Tensor(g.num_nodes('author'), args.embed_size).uniform_(-0.5, 0.5)
-        topic_emb = torch.Tensor(g.num_nodes('field_of_study'), args.embed_size).uniform_(-0.5, 0.5)
-        institution_emb = torch.Tensor(g.num_nodes('institution'), args.embed_size).uniform_(-0.5, 0.5)
+    # features = g.nodes['paper'].data['feat']
+    # if len(args.extra_embedding):
+    #     print(f'Use extra embeddings generated with the {args.extra_embedding} method')
+    #     path = os.path.join(args.emb_path, f'{args.extra_embedding}_nars')
+    #     author_emb = torch.load(os.path.join(path, 'author.pt'), map_location=torch.device('cpu')).float()
+    #     topic_emb = torch.load(os.path.join(path, 'field_of_study.pt'), map_location=torch.device('cpu')).float()
+    #     institution_emb = torch.load(os.path.join(path, 'institution.pt'), map_location=torch.device('cpu')).float()
+    # else:
+    #     author_emb = torch.Tensor(g.num_nodes('author'), args.embed_size).uniform_(-0.5, 0.5)
+    #     topic_emb = torch.Tensor(g.num_nodes('field_of_study'), args.embed_size).uniform_(-0.5, 0.5)
+    #     institution_emb = torch.Tensor(g.num_nodes('institution'), args.embed_size).uniform_(-0.5, 0.5)
+    
+    
+    # load node features
+    node_features = torch.load('../../transformers-and-gnns/ogb/embeddings/ogbn-mag/GraphTransformer_seed0/node_features.pt', map_location=torch.device('cpu'))
 
-    g.nodes['paper'].data['feat'] = features
-    g.nodes['author'].data['feat'] = author_emb
-    g.nodes['institution'].data['feat'] = institution_emb
-    g.nodes['field_of_study'].data['feat'] = topic_emb
+    g.nodes['paper'].data['feat'] = node_features['paper']
+    g.nodes['author'].data['feat'] = node_features['author']
+    g.nodes['institution'].data['feat'] = node_features['institution']
+    g.nodes['field_of_study'].data['feat'] = node_features['field_of_study']
 
     init_labels = init_labels['paper'].squeeze()
     n_classes = int(init_labels.max()) + 1

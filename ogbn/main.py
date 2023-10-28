@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from arch import *
 from model import *
 from utils import *
 
@@ -17,6 +18,20 @@ def main(args):
     if args.seed > 0:
         set_random_seed(args.seed)
     g, init_labels, num_nodes, n_classes, train_nid, val_nid, test_nid, evaluator = load_dataset(args)
+    
+    
+    if args.label_feats and args.num_label_hops >= 3:
+        p = f"ogbn-mag_hop{args.num_label_hops}_total_float.pt"
+        if os.path.exists(p):
+            self_value_dict = torch.load(p)
+        # else:
+        #     print(args.num_label_hops)
+        #     self_value_dict = propagate_self_value_gpu_parallel(g,'P',max_hop=args.num_label_hops, device=device)
+        #     torch.save(self_value_dict, p)
+        print(self_value_dict)
+    else:
+        self_value_dict = None
+    
 
     # =======
     # rearange node idx (for feats & labels)
@@ -100,6 +115,8 @@ def main(args):
         assert 0
 
     feats = {k: v[init2sort] for k, v in feats.items()}
+    
+    feats = {k: v for k, v in feats.items() if k in archs[args.arch][0] or k == tgt_type}
 
     prop_toc = datetime.datetime.now()
     print(f'Time used for feat prop {prop_toc - prop_tic}')
@@ -269,26 +286,42 @@ def main(args):
                 g = clear_hg(g, echo=False)
 
                 # label_feats = remove_self_effect_on_label_feats(label_feats, label_onehot)
-                for k in ['PPP', 'PAP', 'PFP', 'PPPP', 'PAPP', 'PPAP', 'PFPP', 'PPFP']:
-                    if k in label_feats:
-                        diag = torch.load(f'{args.dataset}_{k}_diag.pt')
-                        label_feats[k] = label_feats[k] - diag.unsqueeze(-1) * label_onehot
-                        assert torch.all(label_feats[k] > -1e-6)
-                        print(k, torch.sum(label_feats[k] < 0), label_feats[k].min())
+                if self_value_dict is not None:
+                    for k in label_feats.keys():
+                        label_feats[k] = label_feats[k] - self_value_dict[k].unsqueeze(-1) * label_onehot
+                else:
+                    for k in ['PPP', 'PAP', 'PFP', 'PPPP', 'PAPP', 'PPAP', 'PFPP', 'PPFP']:
+                        if k in label_feats:
+                            diag = torch.load(f'{args.dataset}_{k}_diag.pt')
+                            label_feats[k] = label_feats[k] - diag.unsqueeze(-1) * label_onehot
+                            assert torch.all(label_feats[k] > -1e-6)
+                            print(k, torch.sum(label_feats[k] < 0), label_feats[k].min())
 
                 condition = lambda ra,rb,rc,k: True
                 check_acc(label_feats, condition, init_labels, train_nid, val_nid, test_nid)
 
-                label_emb = (label_feats['PPP'] + label_feats['PAP'] + label_feats['PP'] + label_feats['PFP']) / 4
+                if self_value_dict:
+                    label_emb = 0
+                    for k in label_feats.keys():
+                        label_emb = label_emb + label_feats[k] / len(label_feats.keys())
+                
+                else:
+                    label_emb = (label_feats['PPP'] + label_feats['PAP'] + label_feats['PP'] + label_feats['PFP']) / 4
                 check_acc({'label_emb': label_emb}, condition, init_labels, train_nid, val_nid, test_nid)
         else:
             label_emb = torch.zeros((num_nodes, n_classes))
 
         label_feats = {k: v[init2sort] for k, v in label_feats.items()}
+
+        label_feats = {k: v for k, v in label_feats.items() if k in archs[args.arch][1]}
+
         label_emb = label_emb[init2sort]
 
         if stage == 0:
             label_feats = {}
+            label_path = []
+        else:
+            label_path = archs[args.arch][1]
 
         # =======
         # Eval loader
@@ -334,6 +367,10 @@ def main(args):
         loss_fcn = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                     weight_decay=args.weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, pct_start=0.05, anneal_strategy='linear', final_div_factor=10,\
+        #                         max_lr = args.lr, total_steps = (args.batch_size * 300) * 4 + 1)
 
         best_epoch = 0
         best_val_acc = 0
@@ -376,6 +413,8 @@ def main(args):
                     end = time.time()
                     log += f'Time: {end-start}, Val loss: {loss_val}, Test loss: {loss_test}\n'
                     log += 'Val acc: {:.4f}, Test acc: {:.4f}\n'.format(val_acc*100, test_acc*100)
+                    
+                    scheduler.step(loss_val)
 
                 if val_acc > best_val_acc:
                     best_epoch = epoch
@@ -407,7 +446,7 @@ def parse_args(args=None):
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--cpu", action='store_true', default=False)
     parser.add_argument("--root", type=str, default='../data/')
-    parser.add_argument("--stages", nargs='+',type=int, default=[300, 300],
+    parser.add_argument("--stages", nargs='+',type=int, default=[300, 300, 300, 300],
                         help="The epoch setting for each stage.")
     ## For pre-processing
     parser.add_argument("--emb_path", type=str, default='../data/')
@@ -459,8 +498,9 @@ def parse_args(args=None):
                            + "whose score above this threshold would be added into the training set")
     parser.add_argument("--gama", type=float, default=0.5,
                         help="parameter for the KL loss")
-    parser.add_argument("--start-stage", type=int, default=0)
+    parser.add_argument("--start_stage", type=int, default=0)
     parser.add_argument("--reload", type=str, default='')
+    parser.add_argument('--arch', type=str, default='ogbn_withLabel')
 
     return parser.parse_args(args)
 
