@@ -456,10 +456,10 @@ def load_mag(args, symmetric=True):
 def load_openalex(args, symmetric=True):
     g = torch.load("../../transformers-and-gnns/ogb/dataset/openalex/openalex_ai_graph.pt")
     
-    train_nid = g['paper'].train_mask
-    val_nid = g['paper'].val_mask
-    test_nid = g['paper'].test_mask
-    
+    # load train/val/test split, nid where masks set to true
+    train_nid = g['paper'].train_mask.nonzero(as_tuple=False).squeeze()
+    val_nid = g['paper'].val_mask.nonzero(as_tuple=False).squeeze()
+    test_nid = g['paper'].test_mask.nonzero(as_tuple=False).squeeze()    
     
     # load node features
     node_features = torch.load('../../transformers-and-gnns/ogb/embeddings/ogbn-openalex/GraphTransformer_seed0/node_features.pt', map_location=torch.device('cpu'))
@@ -469,7 +469,7 @@ def load_openalex(args, symmetric=True):
     g['institution'].x = node_features['institution']
     g['field_of_study'].x = node_features['field_of_study']
 
-    init_labels = g['paper'].y.squeeze()
+    init_labels = g['paper'].y
     n_classes = len(torch.unique(init_labels))
     evaluator = get_ogb_evaluator('ogbn-mag')
 
@@ -491,14 +491,16 @@ def load_openalex(args, symmetric=True):
             # Create a sparse adjacency matrix
             # Note: PyTorch Geometric stores edges in COO format, so we need to convert it.
             src, dst = edge_index
-            adj = torch.sparse_coo_tensor(torch.stack((dst, src)), 
-                                        torch.ones(dst.size(0)), 
-                                        (num_dst_nodes, num_src_nodes))
+            # adj = torch.sparse_coo_tensor(torch.stack((dst, src)), 
+            #                             torch.ones(dst.size(0)), 
+            #                             (num_dst_nodes, num_src_nodes))
+            adj = SparseTensor(row=dst, col=src)
 
             # # Convert to undirected if necessary
             # adj = to_undirected(adj)
 
             adjs.append(adj)
+            print(edge_type, adj.sizes())
 
     # F --- *P --- A --- I
     # paper : [736389, 128]
@@ -510,39 +512,37 @@ def load_openalex(args, symmetric=True):
     ntypes = set()
 
     etypes = [ # src->tgt
-        ('A', 'A-I', 'I'),
         ('A', 'A-P', 'P'),
+        ('A', 'A-I', 'I'),  
         ('P', 'P-P', 'P'),
         ('P', 'P-F', 'F'),
     ]
-    
-    for adj in adjs:
-        print(adj.shape)
+
 
     if symmetric:
-        # Assuming adjs[2] is a sparse COO tensor representing an adjacency matrix
-        adj = adjs[2]
-
-        # Convert the adjacency matrix to a symmetric matrix
-        # Add the transpose of the matrix to itself
-        adj_symmetric = adj + adj.t()
-
-        # Remove potential double counts on the diagonal (if necessary)
-        adj_symmetric = adj_symmetric.coalesce()  # Ensures the sparse tensor is in a canonical format
-        diag = adj_symmetric._indices()[0] == adj_symmetric._indices()[1]  # Diagonal indices
-        adj_symmetric._values()[diag] = adj_symmetric._values()[diag] / 2
-
-        # Replace the original adjacency matrix with the symmetric version
-        adjs[2] = adj_symmetric
+        adjs[2] = adjs[2].to_symmetric()  
         # assert torch.all(adjs[2].get_diag() == 0)
+        
+        
+        # # Assuming adjs[2] is a sparse COO tensor representing an adjacency matrix
+        # adj = adjs[2]
+
+        # # Convert the adjacency matrix to a symmetric matrix
+        # # Add the transpose of the matrix to itself
+        # adj_symmetric = adj + adj.t()
+
+        # # Remove potential double counts on the diagonal (if necessary)
+        # adj_symmetric = adj_symmetric.coalesce()  # Ensures the sparse tensor is in a canonical format
+        # diag = adj_symmetric._indices()[0] == adj_symmetric._indices()[1]  # Diagonal indices
+        # adj_symmetric._values()[diag] = adj_symmetric._values()[diag] / 2
+
+        # # Replace the original adjacency matrix with the symmetric version
+        # adjs[2] = adj_symmetric
+        # # assert torch.all(adjs[2].get_diag() == 0)
 
     for etype, adj in zip(etypes, adjs):
         stype, rtype, dtype = etype
-        adj = adj.coalesce()
-        indices = adj.indices()
-        values = adj.values()
-        # Extract the source and destination indices
-        dst, src = indices[0], indices[1]
+        dst, src, _ = adj.coo()
         src = src.numpy()
         dst = dst.numpy()
         if stype == dtype:
@@ -552,6 +552,20 @@ def load_openalex(args, symmetric=True):
             new_edges[(dtype, rtype[::-1], stype)] = (dst, src)
         ntypes.add(stype)
         ntypes.add(dtype)
+        # stype, rtype, dtype = etype
+        # adj = adj.coalesce()
+        # indices = adj.indices()
+        # # Extract the source and destination indices
+        # dst, src = indices[0], indices[1]
+        # src = src.numpy()
+        # dst = dst.numpy()
+        # if stype == dtype:
+        #     new_edges[(stype, rtype, dtype)] = (np.concatenate((src, dst)), np.concatenate((dst, src)))
+        # else:
+        #     new_edges[(stype, rtype, dtype)] = (src, dst)
+        #     new_edges[(dtype, rtype[::-1], stype)] = (dst, src)
+        # ntypes.add(stype)
+        # ntypes.add(dtype)
         
 
     new_g = dgl.heterograph(new_edges)

@@ -39,6 +39,7 @@ def main(args):
     train_node_nums = len(train_nid)
     valid_node_nums = len(val_nid)
     test_node_nums = len(test_nid)
+    print(f'Train {train_node_nums}, Val {valid_node_nums}, Test {test_node_nums}')
     trainval_point = train_node_nums
     valtest_point = trainval_point + valid_node_nums
     total_num_nodes = len(train_nid) + len(val_nid) + len(test_nid)
@@ -90,6 +91,28 @@ def main(args):
         feats = {k: g.ndata.pop(k) for k in keys}
 
     elif args.dataset == 'ogbn-mag': # multi-node-types & multi-edge-types
+        tgt_type = 'P'
+
+        extra_metapath = [] # ['AIAP', 'PAIAP']
+        extra_metapath = [ele for ele in extra_metapath if len(ele) > args.num_hops + 1]
+
+        print(f'Current num hops = {args.num_hops}')
+        if len(extra_metapath):
+            max_hops = max(args.num_hops + 1, max([len(ele) for ele in extra_metapath]))
+        else:
+            max_hops = args.num_hops + 1
+
+        # compute k-hop feature
+        g = hg_propagate(g, tgt_type, args.num_hops, max_hops, extra_metapath, echo=False)
+
+        feats = {}
+        keys = list(g.nodes[tgt_type].data.keys())
+        print(f'Involved feat keys {keys}')
+        for k in keys:
+            feats[k] = g.nodes[tgt_type].data.pop(k)
+
+        g = clear_hg(g, echo=False)
+    elif args.dataset == 'ogbn-openalex': # multi-node-types & multi-edge-types
         tgt_type = 'P'
 
         extra_metapath = [] # ['AIAP', 'PAIAP']
