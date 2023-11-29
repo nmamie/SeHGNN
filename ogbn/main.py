@@ -367,7 +367,7 @@ def main(args):
         loss_fcn = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                     weight_decay=args.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.75, patience=20, verbose=True)
 
         # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, pct_start=0.05, anneal_strategy='linear', final_div_factor=10,\
         #                         max_lr = args.lr, total_steps = (args.batch_size * 300) * 4 + 1)

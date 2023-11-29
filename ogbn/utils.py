@@ -3,6 +3,9 @@ import sys
 import gc
 import random
 
+import torch_geometric
+from torch_geometric.utils import to_undirected
+
 import dgl
 import dgl.function as fn
 
@@ -24,6 +27,7 @@ import multiprocessing as mp
 from multiprocessing import Pool
 from tqdm import tqdm
 import argparse
+import datetime
 
 import sparse_tools
 
@@ -279,8 +283,11 @@ def load_dataset(args):
     elif args.dataset == 'ogbn-mag':
         # train/val/test 629571/64879/41939
         return load_mag(args)
+    elif args.dataset == 'ogbn-openalex':
+        # train/val/test
+        return load_openalex(args)
     else:
-        assert 0, 'Only allowed [ogbn-products, ogbn-proteins, ogbn-arxiv, ogbn-papers100M, ogbn-mag]'
+        assert 0, 'Only allowed [ogbn-products, ogbn-proteins, ogbn-arxiv, ogbn-papers100M, ogbn-mag, ogbn-openalex]'
 
 
 def load_homo(args):
@@ -365,7 +372,7 @@ def load_mag(args, symmetric=True):
     g.nodes['author'].data['feat'] = node_features['author']
     g.nodes['institution'].data['feat'] = node_features['institution']
     g.nodes['field_of_study'].data['feat'] = node_features['field_of_study']
-
+    
     init_labels = init_labels['paper'].squeeze()
     n_classes = int(init_labels.max()) + 1
     evaluator = get_ogb_evaluator(args.dataset)
@@ -420,6 +427,147 @@ def load_mag(args, symmetric=True):
     new_g.nodes['A'].data['A'] = g.nodes['author'].data['feat']
     new_g.nodes['I'].data['I'] = g.nodes['institution'].data['feat']
     new_g.nodes['F'].data['F'] = g.nodes['field_of_study'].data['feat']
+
+    IA, PA, PP, FP = adjs
+
+    diag_name = f'{args.dataset}_PFP_diag.pt'
+    if not os.path.exists(diag_name):
+        PF = FP.t()
+        PFP_diag = sparse_tools.spspmm_diag_sym_ABA(PF)
+        torch.save(PFP_diag, diag_name)
+
+    if symmetric:
+        diag_name = f'{args.dataset}_PPP_diag.pt'
+        if not os.path.exists(diag_name):
+            # PP = PP.to_symmetric()
+            # assert torch.all(PP.get_diag() == 0)
+            PPP_diag = sparse_tools.spspmm_diag_sym_AAA(PP)
+            torch.save(PPP_diag, diag_name)
+    else:
+        assert False
+
+    diag_name = f'{args.dataset}_PAP_diag.pt'
+    if not os.path.exists(diag_name):
+        PAP_diag = sparse_tools.spspmm_diag_sym_ABA(PA)
+        torch.save(PAP_diag, diag_name)
+
+    return new_g, init_labels, new_g.num_nodes('P'), n_classes, train_nid, val_nid, test_nid, evaluator
+
+def load_openalex(args, symmetric=True):
+    g = torch.load("../../transformers-and-gnns/ogb/dataset/openalex/openalex_ai_graph.pt")
+    
+    train_nid = g['paper'].train_mask
+    val_nid = g['paper'].val_mask
+    test_nid = g['paper'].test_mask
+    
+    
+    # load node features
+    node_features = torch.load('../../transformers-and-gnns/ogb/embeddings/ogbn-openalex/GraphTransformer_seed0/node_features.pt', map_location=torch.device('cpu'))
+
+    g['paper'].x = node_features['paper']
+    g['author'].x = node_features['author']
+    g['institution'].x = node_features['institution']
+    g['field_of_study'].x = node_features['field_of_study']
+
+    init_labels = g['paper'].y.squeeze()
+    n_classes = len(torch.unique(init_labels))
+    evaluator = get_ogb_evaluator('ogbn-mag')
+
+    for node_type in g.node_types:
+        print(node_type, g[node_type].x.shape)
+        
+
+    adjs = []
+    for edge_type in g.edge_types:
+        if not edge_type[1][:3] == "rev":
+            # Get edge index for the specific edge type
+            edge_index = g[edge_type].edge_index
+
+            # Determine the number of nodes for source and destination node types
+            src_node_type, _, dst_node_type = edge_type
+            num_src_nodes = g[src_node_type].num_nodes
+            num_dst_nodes = g[dst_node_type].num_nodes
+
+            # Create a sparse adjacency matrix
+            # Note: PyTorch Geometric stores edges in COO format, so we need to convert it.
+            src, dst = edge_index
+            adj = torch.sparse_coo_tensor(torch.stack((dst, src)), 
+                                        torch.ones(dst.size(0)), 
+                                        (num_dst_nodes, num_src_nodes))
+
+            # # Convert to undirected if necessary
+            # adj = to_undirected(adj)
+
+            adjs.append(adj)
+
+    # F --- *P --- A --- I
+    # paper : [736389, 128]
+    # author: [1134649, 256]
+    # institution [8740, 256]
+    # field_of_study [59965, 256]
+
+    new_edges = {}
+    ntypes = set()
+
+    etypes = [ # src->tgt
+        ('A', 'A-I', 'I'),
+        ('A', 'A-P', 'P'),
+        ('P', 'P-P', 'P'),
+        ('P', 'P-F', 'F'),
+    ]
+    
+    for adj in adjs:
+        print(adj.shape)
+
+    if symmetric:
+        # Assuming adjs[2] is a sparse COO tensor representing an adjacency matrix
+        adj = adjs[2]
+
+        # Convert the adjacency matrix to a symmetric matrix
+        # Add the transpose of the matrix to itself
+        adj_symmetric = adj + adj.t()
+
+        # Remove potential double counts on the diagonal (if necessary)
+        adj_symmetric = adj_symmetric.coalesce()  # Ensures the sparse tensor is in a canonical format
+        diag = adj_symmetric._indices()[0] == adj_symmetric._indices()[1]  # Diagonal indices
+        adj_symmetric._values()[diag] = adj_symmetric._values()[diag] / 2
+
+        # Replace the original adjacency matrix with the symmetric version
+        adjs[2] = adj_symmetric
+        # assert torch.all(adjs[2].get_diag() == 0)
+
+    for etype, adj in zip(etypes, adjs):
+        stype, rtype, dtype = etype
+        adj = adj.coalesce()
+        indices = adj.indices()
+        values = adj.values()
+        # Extract the source and destination indices
+        dst, src = indices[0], indices[1]
+        src = src.numpy()
+        dst = dst.numpy()
+        if stype == dtype:
+            new_edges[(stype, rtype, dtype)] = (np.concatenate((src, dst)), np.concatenate((dst, src)))
+        else:
+            new_edges[(stype, rtype, dtype)] = (src, dst)
+            new_edges[(dtype, rtype[::-1], stype)] = (dst, src)
+        ntypes.add(stype)
+        ntypes.add(dtype)
+        
+
+    new_g = dgl.heterograph(new_edges)
+    print(new_g.number_of_nodes('P'))
+    print(new_g.number_of_nodes('A'))
+    print(new_g.number_of_nodes('I'))
+    print(new_g.number_of_nodes('F'))
+    print(g['paper'].x.shape)
+    print(g['author'].x.shape)
+    print(g['institution'].x.shape)
+    print(g['field_of_study'].x.shape)
+    print("------------------")
+    new_g.nodes['P'].data['P'] = g['paper'].x
+    new_g.nodes['A'].data['A'] = g['author'].x
+    new_g.nodes['I'].data['I'] = g['institution'].x
+    new_g.nodes['F'].data['F'] = g['field_of_study'].x
 
     IA, PA, PP, FP = adjs
 
