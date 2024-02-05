@@ -3,9 +3,6 @@ import sys
 import gc
 import random
 
-import torch_geometric
-from torch_geometric.utils import to_undirected
-
 import dgl
 import dgl.function as fn
 
@@ -27,7 +24,6 @@ import multiprocessing as mp
 from multiprocessing import Pool
 from tqdm import tqdm
 import argparse
-import datetime
 
 import sparse_tools
 
@@ -157,7 +153,6 @@ def train(model, train_loader, loss_fcn, optimizer, evaluator, device,
                     output_att = torch.sigmoid(output_att)
                 loss_train = loss_fcn(output_att, batch_y)
             scalar.scale(loss_train).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             scalar.step(optimizer)
             scalar.update()
         else:
@@ -167,7 +162,6 @@ def train(model, train_loader, loss_fcn, optimizer, evaluator, device,
             L1 = loss_fcn(output_att, batch_y)
             loss_train = L1
             loss_train.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
         y_true.append(batch_y.cpu().to(torch.long))
@@ -212,7 +206,6 @@ def train_multi_stage(model, train_loader, enhance_loader, loss_fcn, optimizer, 
                 L2 = (L2 * extra_weight).sum() / len(idx_2)
                 loss_train = L1_ratio * L1 + gama * L2_ratio * L2
             scalar.scale(loss_train).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             scalar.step(optimizer)
             scalar.update()
         else:
@@ -226,7 +219,6 @@ def train_multi_stage(model, train_loader, enhance_loader, loss_fcn, optimizer, 
             # loss = L1 + L3*gama
             loss_train = L1_ratio * L1 + gama * L2_ratio * L2
             loss_train.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
         y_true.append(labels[idx_1].to(torch.long))
@@ -263,7 +255,7 @@ def get_ogb_evaluator(dataset):
         })["acc"]
 
 
-def load_dataset(args):
+def load_dataset(args, seed, run):
     if args.dataset == 'ogbn-products':
         # num_nodes=2449029, num_edges=123718280, num_feats=100, num_classes=47
         # train/val/test 196615/39323/2213091
@@ -284,8 +276,8 @@ def load_dataset(args):
         # train/val/test 629571/64879/41939
         return load_mag(args)
     elif args.dataset == 'ogbn-openalex':
-        # train/val/test
-        return load_openalex(args)
+        # train/val/test 629571/64879/41939
+        return load_openalex(args, seed, run)
     else:
         assert 0, 'Only allowed [ogbn-products, ogbn-proteins, ogbn-arxiv, ogbn-papers100M, ogbn-mag, ogbn-openalex]'
 
@@ -352,27 +344,23 @@ def load_mag(args, symmetric=True):
     val_nid = splitted_idx['valid']['paper']
     test_nid = splitted_idx['test']['paper']
 
-    # features = g.nodes['paper'].data['feat']
-    # if len(args.extra_embedding):
-    #     print(f'Use extra embeddings generated with the {args.extra_embedding} method')
-    #     path = os.path.join(args.emb_path, f'{args.extra_embedding}_nars')
-    #     author_emb = torch.load(os.path.join(path, 'author.pt'), map_location=torch.device('cpu')).float()
-    #     topic_emb = torch.load(os.path.join(path, 'field_of_study.pt'), map_location=torch.device('cpu')).float()
-    #     institution_emb = torch.load(os.path.join(path, 'institution.pt'), map_location=torch.device('cpu')).float()
-    # else:
-    #     author_emb = torch.Tensor(g.num_nodes('author'), args.embed_size).uniform_(-0.5, 0.5)
-    #     topic_emb = torch.Tensor(g.num_nodes('field_of_study'), args.embed_size).uniform_(-0.5, 0.5)
-    #     institution_emb = torch.Tensor(g.num_nodes('institution'), args.embed_size).uniform_(-0.5, 0.5)
-    
-    
-    # load node features
-    node_features = torch.load('../../transformers-and-gnns/ogb/embeddings/ogbn-mag/GraphTransformer_seed0/node_features.pt', map_location=torch.device('cpu'))
+    features = g.nodes['paper'].data['feat']
+    if len(args.extra_embedding):
+        print(f'Use extra embeddings generated with the {args.extra_embedding} method')
+        path = os.path.join(args.emb_path, f'{args.extra_embedding}_nars')
+        author_emb = torch.load(os.path.join(path, 'author.pt'), map_location=torch.device('cpu')).float()
+        topic_emb = torch.load(os.path.join(path, 'field_of_study.pt'), map_location=torch.device('cpu')).float()
+        institution_emb = torch.load(os.path.join(path, 'institution.pt'), map_location=torch.device('cpu')).float()
+    else:
+        author_emb = torch.Tensor(g.num_nodes('author'), args.embed_size).uniform_(-0.5, 0.5)
+        topic_emb = torch.Tensor(g.num_nodes('field_of_study'), args.embed_size).uniform_(-0.5, 0.5)
+        institution_emb = torch.Tensor(g.num_nodes('institution'), args.embed_size).uniform_(-0.5, 0.5)
 
-    g.nodes['paper'].data['feat'] = node_features['paper']
-    g.nodes['author'].data['feat'] = node_features['author']
-    g.nodes['institution'].data['feat'] = node_features['institution']
-    g.nodes['field_of_study'].data['feat'] = node_features['field_of_study']
-    
+    g.nodes['paper'].data['feat'] = features
+    g.nodes['author'].data['feat'] = author_emb
+    g.nodes['institution'].data['feat'] = institution_emb
+    g.nodes['field_of_study'].data['feat'] = topic_emb
+
     init_labels = init_labels['paper'].squeeze()
     n_classes = int(init_labels.max()) + 1
     evaluator = get_ogb_evaluator(args.dataset)
@@ -453,21 +441,36 @@ def load_mag(args, symmetric=True):
 
     return new_g, init_labels, new_g.num_nodes('P'), n_classes, train_nid, val_nid, test_nid, evaluator
 
-def load_openalex(args, symmetric=True):
-    g = torch.load("../../transformers-and-gnns/ogb/dataset/openalex/openalex_ai_graph.pt")
-    
+def load_openalex(args, seed, run, symmetric=True):
+    g = torch.load("../data/ogbn_openalex/openalex_ai_graph.pt")
+
     # load train/val/test split, nid where masks set to true
     train_nid = g['paper'].train_mask.nonzero(as_tuple=False).squeeze()
     val_nid = g['paper'].val_mask.nonzero(as_tuple=False).squeeze()
-    test_nid = g['paper'].test_mask.nonzero(as_tuple=False).squeeze()    
-    
-    # load node features
-    node_features = torch.load('../../transformers-and-gnns/ogb/embeddings/ogbn-openalex/GraphTransformer_seed0/node_features.pt', map_location=torch.device('cpu'))
+    test_nid = g['paper'].test_mask.nonzero(as_tuple=False).squeeze()
 
-    g['paper'].x = node_features['paper']
-    g['author'].x = node_features['author']
-    g['institution'].x = node_features['institution']
-    g['field_of_study'].x = node_features['field_of_study']
+    # # load node features
+    # node_features = torch.load(f'../../transformers-and-gnns/openalex/graph-features/embeddings/ogbn-openalex/GraphTransformer_seed{seed}/node_features_{run}.pt', map_location=torch.device('cpu'))
+    
+    if len(args.extra_embedding):
+        print(f'Use extra embeddings generated with the {args.extra_embedding} method')
+        path = os.path.join(args.emb_path, f'{args.extra_embedding}_nars')
+        author_emb = torch.load(os.path.join(path, 'author.pt'), map_location=torch.device('cpu')).float()
+        topic_emb = torch.load(os.path.join(path, 'field_of_study.pt'), map_location=torch.device('cpu')).float()
+        institution_emb = torch.load(os.path.join(path, 'institution.pt'), map_location=torch.device('cpu')).float()
+    else:
+        author_emb = torch.Tensor(g['author'].num_nodes, args.embed_size).uniform_(-0.5, 0.5)
+        topic_emb = torch.Tensor(g['field_of_study'].num_nodes, args.embed_size).uniform_(-0.5, 0.5)
+        institution_emb = torch.Tensor(g['institution'].num_nodes, args.embed_size).uniform_(-0.5, 0.5)
+
+    g['author'].x = author_emb
+    g['institution'].x = institution_emb
+    g['field_of_study'].x = topic_emb
+
+    # g['paper'].x = node_features['paper']
+    # g['author'].x = node_features['author']
+    # g['institution'].x = node_features['institution']
+    # g['field_of_study'].x = node_features['field_of_study']
 
     init_labels = g['paper'].y
     n_classes = len(torch.unique(init_labels))
@@ -475,7 +478,7 @@ def load_openalex(args, symmetric=True):
 
     for node_type in g.node_types:
         print(node_type, g[node_type].x.shape)
-        
+
 
     adjs = []
     for edge_type in g.edge_types:
@@ -483,62 +486,33 @@ def load_openalex(args, symmetric=True):
             # Get edge index for the specific edge type
             edge_index = g[edge_type].edge_index
 
-            # Determine the number of nodes for source and destination node types
-            src_node_type, _, dst_node_type = edge_type
-            num_src_nodes = g[src_node_type].num_nodes
-            num_dst_nodes = g[dst_node_type].num_nodes
-
             # Create a sparse adjacency matrix
             # Note: PyTorch Geometric stores edges in COO format, so we need to convert it.
             src, dst = edge_index
-            # adj = torch.sparse_coo_tensor(torch.stack((dst, src)), 
-            #                             torch.ones(dst.size(0)), 
-            #                             (num_dst_nodes, num_src_nodes))
             adj = SparseTensor(row=dst, col=src)
-
-            # # Convert to undirected if necessary
-            # adj = to_undirected(adj)
 
             adjs.append(adj)
             print(edge_type, adj.sizes())
 
     # F --- *P --- A --- I
-    # paper : [736389, 128]
-    # author: [1134649, 256]
-    # institution [8740, 256]
-    # field_of_study [59965, 256]
+    # paper : [316446, 128]
+    # author: [697199, 128]
+    # institution [26865, 128]
+    # field_of_study [26992, 128]
 
     new_edges = {}
     ntypes = set()
 
     etypes = [ # src->tgt
         ('A', 'A-P', 'P'),
-        ('A', 'A-I', 'I'),  
+        ('A', 'A-I', 'I'),
         ('P', 'P-P', 'P'),
         ('P', 'P-F', 'F'),
     ]
 
 
     if symmetric:
-        adjs[2] = adjs[2].to_symmetric()  
-        # assert torch.all(adjs[2].get_diag() == 0)
-        
-        
-        # # Assuming adjs[2] is a sparse COO tensor representing an adjacency matrix
-        # adj = adjs[2]
-
-        # # Convert the adjacency matrix to a symmetric matrix
-        # # Add the transpose of the matrix to itself
-        # adj_symmetric = adj + adj.t()
-
-        # # Remove potential double counts on the diagonal (if necessary)
-        # adj_symmetric = adj_symmetric.coalesce()  # Ensures the sparse tensor is in a canonical format
-        # diag = adj_symmetric._indices()[0] == adj_symmetric._indices()[1]  # Diagonal indices
-        # adj_symmetric._values()[diag] = adj_symmetric._values()[diag] / 2
-
-        # # Replace the original adjacency matrix with the symmetric version
-        # adjs[2] = adj_symmetric
-        # # assert torch.all(adjs[2].get_diag() == 0)
+        adjs[2] = adjs[2].to_symmetric()
 
     for etype, adj in zip(etypes, adjs):
         stype, rtype, dtype = etype
@@ -552,21 +526,7 @@ def load_openalex(args, symmetric=True):
             new_edges[(dtype, rtype[::-1], stype)] = (dst, src)
         ntypes.add(stype)
         ntypes.add(dtype)
-        # stype, rtype, dtype = etype
-        # adj = adj.coalesce()
-        # indices = adj.indices()
-        # # Extract the source and destination indices
-        # dst, src = indices[0], indices[1]
-        # src = src.numpy()
-        # dst = dst.numpy()
-        # if stype == dtype:
-        #     new_edges[(stype, rtype, dtype)] = (np.concatenate((src, dst)), np.concatenate((dst, src)))
-        # else:
-        #     new_edges[(stype, rtype, dtype)] = (src, dst)
-        #     new_edges[(dtype, rtype[::-1], stype)] = (dst, src)
-        # ntypes.add(stype)
-        # ntypes.add(dtype)
-        
+
 
     new_g = dgl.heterograph(new_edges)
     print(new_g.number_of_nodes('P'))
